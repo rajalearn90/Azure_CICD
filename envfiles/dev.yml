@@ -1,0 +1,13 @@
+variables:
+  - name: ENV
+    value: ${{ parameters.environment }}
+  - name: dockerRegistryServiceConnection
+    value: 'ado-acr-sp'
+  - name: dockerfilePath
+    value: '**/Dockerfile'
+  - name: containerRegistry
+    value: 'mmcacr1.azurecr.io'
+  - name: imageRepository
+    value: 'boardgame'
+  - name: tag
+    value: '$(Build.BuildId)'
