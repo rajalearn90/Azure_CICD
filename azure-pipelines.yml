@@ -1,0 +1,123 @@
+trigger:
+  none
+
+pool:
+  name: Avivapool
+
+parameters:
+  - name: environment
+    displayName: environment name
+    default: dev
+    values:
+      - dev
+      - UAT
+      - Perf
+      - prod
+
+variables:
+  - template: envfiles/${{ parameters.environment }}.yaml
+
+stages:
+- stage: Build_Stage
+  displayName: Build_stage
+  jobs:
+  - job: Build_Job
+    displayName: Build_job
+    steps:
+    - script: |
+        echo "Reading config for environment: ${{ parameters.environment }}"
+
+        JSON_PATH="$(Build.SourcesDirectory)/envfiles/envconfig.json"
+        ENV=$(echo "${{ parameters.environment }}" | tr -d '\r')
+
+        RESOURCE_GROUP=$(jq -r ".\"$ENV\".RG_name" "$JSON_PATH")
+        NAMESPACE=$(jq -r ".\"$ENV\".namespace" "$JSON_PATH")
+        CLUSTERNAME=$(jq -r ".\"$ENV\".clustername" "$JSON_PATH")
+        TAG=$(jq -r ".\"$ENV\".tag" "$JSON_PATH")
+        DEPLOYMENT_NAME=$(jq -r ".\"$ENV\".deploymentname" "$JSON_PATH")
+
+        echo "##vso[task.setvariable variable=resourceGroup;isOutput=true]$RESOURCE_GROUP"
+        echo "##vso[task.setvariable variable=namespace;isOutput=true]$NAMESPACE"
+        echo "##vso[task.setvariable variable=clustername;isOutput=true]$CLUSTERNAME"
+        echo "##vso[task.setvariable variable=deploymentname;isOutput=true]$DEPLOYMENT_NAME"
+        echo "##vso[task.setvariable variable=tag;isOutput=true]$TAG"
+
+        echo "Loaded config for $ENV"
+      name: SetEnvVars
+      displayName: 'Before-script- Load the variables'
+
+    - script: |
+        echo "Using RG: $(SetEnvVars.resourceGroup)"
+        echo "Namespace: $(SetEnvVars.namespace)"
+        echo "Cluster: $(SetEnvVars.clustername)"
+        echo "Tag: $(SetEnvVars.tag)"
+      displayName: 'Before-script- Print loaded variables' 
+
+    - task: Maven@4
+      inputs:
+        mavenPomFile: 'pom.xml'
+        publishJUnitResults: true
+        testResultsFiles: '**/surefire-reports/TEST-*.xml'
+        javaHomeOption: 'JDKVersion'
+        mavenVersionOption: 'Default'
+        mavenAuthenticateFeed: false
+        effectivePomSkip: false
+        sonarQubeRunAnalysis: false
+
+    - task: Docker@2
+      displayName: Build and push an image to container registry
+      inputs:
+        containerRegistry: '$(dockerRegistryServiceConnection)'
+        repository: '$(imageRepository)'
+        command: 'buildAndPush'
+        Dockerfile: '**/Dockerfile'
+        tags: '$(tag)'
+
+- stage: Deploy
+  displayName: Deploy stage
+  dependsOn: Build_Stage
+  variables:
+    resourceGroup: $[ dependencies.Build_Stage.outputs['Build_Job.SetEnvVars.resourceGroup'] ]
+    namespace: $[ dependencies.Build_Stage.outputs['Build_Job.SetEnvVars.namespace'] ]
+    clustername: $[ dependencies.Build_Stage.outputs['Build_Job.SetEnvVars.clustername'] ]
+    deploymentname: $[ dependencies.Build_Stage.outputs['Build_Job.SetEnvVars.deploymentname'] ]
+    tag: $[ dependencies.Build_Stage.outputs['Build_Job.SetEnvVars.tag'] ]
+    environment: ${{ parameters.environment }}
+  jobs:
+  - deployment: Deploy
+    displayName: Deploy
+    environment: ${{ parameters.environment }}_Approve
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - checkout: self
+          
+          - script: |
+              curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+            displayName: 'Install Helm CLI'
+
+          - script: |
+             helm plugin install https://github.com/databus23/helm-diff || echo "Helm diff plugin already installed"
+            displayName: 'Install Helm Diff Plugin'
+
+          - script: |
+              HELMFILE_VERSION=v1.1.4
+              curl -LO https://github.com/helmfile/helmfile/releases/download/v1.1.4/helmfile_1.1.4_linux_amd64.tar.gz
+              tar -xzf helmfile_1.1.4_linux_amd64.tar.gz
+              chmod +x helmfile
+              sudo mv helmfile /usr/local/bin/helmfile
+              helmfile --version
+            displayName: 'Install Helmfile v1.1.4'
+
+          - script: |
+             helm plugin list
+            displayName: 'Show installed Helm plugins'
+
+          - script: |
+              git clone https://rajalearn90:$(HELMREPO)@github.com/rajalearn90/HelmfileRepo.git
+            displayName: 'Helm Repo clone'
+
+          - script: |
+              helm template $(deploymentname) ./HelmfileRepo --debug -f values/$(environment).yaml
+            displayName: 'Deploy with Helmfile using env specific values file'
