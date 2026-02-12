@@ -1,0 +1,16 @@
+{
+  "dev": {
+    "RG_name": "LBG-RG",
+    "namespace": "default",
+    "clustername": "aksdemocluster",
+    "tag": "1",
+    "deploymentname": "dev-stable"
+  },
+  "prod": {
+    "RG_name": "LBG-RG",
+    "namespace": "default",
+    "clustername": "aksdemocluster",
+    "tag": "1",
+    "deploymentname": "prod-stable"
+  }
+}
