@@ -5,6 +5,13 @@ pool:
   name: Avivapool
 
 parameters:
+  - name: appid
+    displayName: app id
+    default: mmc-ach
+    values:
+      - mmc-ach
+      - mmc-global
+      - mmc-internal
   - name: environment
     displayName: environment name
     default: dev
@@ -12,7 +19,7 @@ parameters:
       - dev
       - UAT
       - Perf
-      - prod
+      - prod  
 
 variables:
   - template: envfiles/${{ parameters.environment }}.yaml
@@ -29,18 +36,19 @@ stages:
 
         JSON_PATH="$(Build.SourcesDirectory)/envfiles/envconfig.json"
         ENV=$(echo "${{ parameters.environment }}" | tr -d '\r')
+        APPENV=$(echo "${{ parameters.appid }}-${{ parameters.environment }}" | tr -d '\r')
 
-        RESOURCE_GROUP=$(jq -r ".\"$ENV\".RG_name" "$JSON_PATH")
-        NAMESPACE=$(jq -r ".\"$ENV\".namespace" "$JSON_PATH")
-        CLUSTERNAME=$(jq -r ".\"$ENV\".clustername" "$JSON_PATH")
-        TAG=$(jq -r ".\"$ENV\".tag" "$JSON_PATH")
-        DEPLOYMENT_NAME=$(jq -r ".\"$ENV\".deploymentname" "$JSON_PATH")
+        RESOURCE_GROUP=$(jq -r ".\"$APPENV\".RG_name" "$JSON_PATH")
+        NAMESPACE=$(jq -r ".\"$APPENV\".namespace" "$JSON_PATH")
+        CLUSTERNAME=$(jq -r ".\"$APPENV\".clustername" "$JSON_PATH")
+        DEPLOYMENT_NAME="${{ parameters.appid }}-${{ parameters.environment }}-$(tag)"
+        DEPLOYMENT_NAME="${DEPLOYMENT_NAME//$'\r'/}"
 
         echo "##vso[task.setvariable variable=resourceGroup;isOutput=true]$RESOURCE_GROUP"
         echo "##vso[task.setvariable variable=namespace;isOutput=true]$NAMESPACE"
         echo "##vso[task.setvariable variable=clustername;isOutput=true]$CLUSTERNAME"
         echo "##vso[task.setvariable variable=deploymentname;isOutput=true]$DEPLOYMENT_NAME"
-        echo "##vso[task.setvariable variable=tag;isOutput=true]$TAG"
+        echo "##vso[task.setvariable variable=appenv;isOutput=true]$APPENV"
 
         echo "Loaded config for $ENV"
       name: SetEnvVars
@@ -50,8 +58,33 @@ stages:
         echo "Using RG: $(SetEnvVars.resourceGroup)"
         echo "Namespace: $(SetEnvVars.namespace)"
         echo "Cluster: $(SetEnvVars.clustername)"
-        echo "Tag: $(SetEnvVars.tag)"
-      displayName: 'Before-script- Print loaded variables' 
+        echo "deploymentname: $(SetEnvVars.deploymentname)"
+        echo "appenv: $(SetEnvVars.appenv)"
+        echo "tag: $(tag)"
+        
+      displayName: 'Before-script- Print loaded variables'
+
+    # OWASP Dependency-Check scan step
+    - script: |
+        echo "Installing unzip utility"
+        sudo apt-get update
+        sudo apt-get install -y unzip
+        
+        echo "Installing OWASP Dependency-Check CLI"
+
+        wget https://github.com/jeremylong/DependencyCheck/releases/download/v8.4.1/dependency-check-8.4.1-release.zip
+        unzip dependency-check-8.4.1-release.zip -d dependency-check
+        
+        chmod +x dependency-check/dependency-check/bin/dependency-check.sh
+
+        echo "My PWD:"
+        pwd
+
+        echo "Running OWASP Dependency-Check scan"
+        ./dependency-check/dependency-check/bin/dependency-check.sh --project "MMCProject" --scan ./src --out ./dependency-check-report --prettyPrint --suppression suppressions.xml
+
+        echo "Dependency-Check reports generated in dependency-check-report directory"
+      displayName: 'Run OWASP Dependency-Check Scan'  
 
     - task: Maven@4
       inputs:
@@ -93,6 +126,17 @@ stages:
           steps:
           - checkout: self
           
+          - task: AzureCLI@2
+            displayName: 'Login using Federated Identity and get AKS credentials'
+            inputs:
+              azureSubscription: 'raja-az-cloud-sc'  # Federated identity service connection
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                az aks get-credentials --name $(clustername) --resource-group $(resourceGroup) --overwrite-existing
+                kubectl config use-context $(clustername)
+                kubectl config set-context $(clustername) --namespace=$(namespace)
+                
           - script: |
               curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
             displayName: 'Install Helm CLI'
@@ -100,19 +144,6 @@ stages:
           - script: |
              helm plugin install https://github.com/databus23/helm-diff || echo "Helm diff plugin already installed"
             displayName: 'Install Helm Diff Plugin'
-
-          - script: |
-              HELMFILE_VERSION=v1.1.4
-              curl -LO https://github.com/helmfile/helmfile/releases/download/v1.1.4/helmfile_1.1.4_linux_amd64.tar.gz
-              tar -xzf helmfile_1.1.4_linux_amd64.tar.gz
-              chmod +x helmfile
-              sudo mv helmfile /usr/local/bin/helmfile
-              helmfile --version
-            displayName: 'Install Helmfile v1.1.4'
-
-          - script: |
-             helm plugin list
-            displayName: 'Show installed Helm plugins'
 
           - script: |
               git clone https://rajalearn90:$(HELMREPO)@github.com/rajalearn90/HelmfileRepo.git
